@@ -117,6 +117,21 @@ def main(args=None):
         _, model_kwargs = collate(collate_args)
 
     model_kwargs['y'] = {key: val.to(dist_util.dev()) if torch.is_tensor(val) else val for key, val in model_kwargs['y'].items()}
+    # ============================================================
+    # Amplitude condition
+    # ============================================================
+
+    if getattr(args, "amp_cond", False):
+        model_kwargs["y"]["t_amp"] = torch.full(
+            (args.batch_size,),
+            float(args.t_amp),
+            dtype=torch.float32,
+            device=dist_util.dev()
+        )
+
+        print(
+            f"Amplitude condition t_amp = {args.t_amp}"
+        )
     init_image = None    
     
     all_motions = []

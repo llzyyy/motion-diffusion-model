@@ -29,7 +29,21 @@ class MDM(nn.Module):
         self.translation = translation
 
         self.latent_dim = latent_dim
+        # ============================================================
+        # Amplitude conditioning
+        # ============================================================
 
+        self.amp_cond = kargs.get(
+            'amp_cond',
+            False
+        )
+
+        if self.amp_cond:
+            print("EMBED AMPLITUDE")
+
+            self.embed_amp = AmplitudeEmbedder(
+                self.latent_dim
+            )
         self.ff_size = ff_size
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -193,7 +207,41 @@ class MDM(nn.Module):
         """
         bs, njoints, nfeats, nframes = x.shape
         time_emb = self.embed_timestep(timesteps)  # [1, bs, d]
+        # ====================================================
+        # Amplitude condition
+        #
+        # t_amp:
+        #     [batch]
+        #
+        # -> amplitude embedding
+        #     [1, batch, latent_dim]
+        #
+        # 与 timestep embedding 相加
+        # ====================================================
 
+        if self.amp_cond:
+
+            if 't_amp' in y:
+
+                t_amp = y['t_amp']
+
+            else:
+
+                # 没提供幅度时默认 normal
+                t_amp = torch.zeros(
+                    bs,
+                    device=x.device
+                )
+
+            amp_emb = self.embed_amp(
+                t_amp
+            )
+
+            time_emb = (
+                time_emb
+                +
+                amp_emb
+            )
         if 'target_cond' in y.keys():
             # NOTE: We don't use CFG for joints - but we do wat to support uncond sampling for generation and eval!
             time_emb += self.mask_cond(self.embed_target_cond(y['target_cond'], y['target_joint_names'], y['is_heading'])[None], force_mask=y.get('target_uncond', False))  # For uncond support and CFG
@@ -312,7 +360,140 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.shape[0], :]
         return self.dropout(x)
 
+class AmplitudeEmbedder(nn.Module):
+    """
+    Embed scalar amplitude condition t_amp
+    into MDM latent space.
 
+    Input:
+        t_amp: [batch] or [batch, 1]
+
+    Output:
+        [1, batch, latent_dim]
+    """
+
+    def __init__(
+        self,
+        latent_dim,
+        hidden_dim=128
+    ):
+        super().__init__()
+
+        self.net = nn.Sequential(
+
+            nn.Linear(
+                1,
+                hidden_dim
+            ),
+
+            nn.SiLU(),
+
+            nn.Linear(
+                hidden_dim,
+                latent_dim
+            )
+        )
+
+        # ----------------------------------------------------
+        # 非常重要：
+        #
+        # 最后一层初始化为 0。
+        #
+        # 所以刚加入 amplitude branch 时：
+        #
+        # e_amp = 0
+        #
+        # 不会破坏 pretrained MDM 的原始行为。
+        # ----------------------------------------------------
+
+        nn.init.zeros_(
+            self.net[-1].weight
+        )
+
+        nn.init.zeros_(
+            self.net[-1].bias
+        )
+
+    def forward(
+        self,
+        t_amp
+    ):
+
+        # 获取 amplitude encoder 所在设备
+        device = (
+            self.net[0]
+            .weight
+            .device
+        )
+
+        dtype = (
+            self.net[0]
+            .weight
+            .dtype
+        )
+
+        # ----------------------------------------------------
+        # 转 tensor
+        # ----------------------------------------------------
+
+        if not torch.is_tensor(
+            t_amp
+        ):
+
+            t_amp = torch.tensor(
+                t_amp,
+                device=device,
+                dtype=dtype
+            )
+
+        else:
+
+            t_amp = t_amp.to(
+                device=device,
+                dtype=dtype
+            )
+
+        # ----------------------------------------------------
+        # scalar -> [1]
+        # ----------------------------------------------------
+
+        if t_amp.dim() == 0:
+
+            t_amp = (
+                t_amp
+                .unsqueeze(0)
+            )
+
+        # ----------------------------------------------------
+        # [B] -> [B, 1]
+        # ----------------------------------------------------
+
+        if t_amp.dim() == 1:
+
+            t_amp = (
+                t_amp
+                .unsqueeze(-1)
+            )
+
+        # ----------------------------------------------------
+        # amplitude embedding
+        #
+        # [B,1]
+        #   ↓
+        # [B,D]
+        # ----------------------------------------------------
+
+        emb = self.net(
+            t_amp
+        )
+
+        # MDM condition 格式：
+        #
+        # [1, B, D]
+
+        emb = emb.unsqueeze(0)
+
+        return emb
 class TimestepEmbedder(nn.Module):
     def __init__(self, latent_dim, sequence_pos_encoder):
         super().__init__()

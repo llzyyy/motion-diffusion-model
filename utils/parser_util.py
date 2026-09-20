@@ -130,7 +130,14 @@ def add_model_options(parser):
     # Prefix completion model
     group.add_argument("--context_len", default=0, type=int, help="If larger than 0, will do prefix completion.")
     group.add_argument("--pred_len", default=0, type=int, help="If context_len larger than 0, will do prefix completion. If pred_len will not be specified - will use the same length as context_len")
-    
+    group.add_argument(
+        "--amp_cond",
+        action="store_true",
+        help=(
+            "Enable continuous motion "
+            "amplitude conditioning."
+        )
+    )
 
 
 
@@ -190,8 +197,18 @@ def add_training_options(parser):
     group.add_argument("--autoregressive_include_prefix", action='store_true', help="If true, include the init prefix in the output, otherwise, will drop it.")
     group.add_argument("--autoregressive_init", default='data', type=str, choices=['data', 'isaac'], 
                         help="Sets the source of the init frames, either from the dataset or isaac init poses.")
-
-
+    group.add_argument(
+        "--pretrained_model_path",
+        default="",
+        type=str,
+        help="Pretrained MDM checkpoint used to initialize amplitude fine-tuning."
+    )
+    group.add_argument(
+        "--lambda_amp",
+        default=0.0,
+        type=float,
+        help="Weight of explicit motion amplitude loss."
+    )
 def add_sampling_options(parser):
     group = parser.add_argument_group('sampling')
     group.add_argument("--model_path", required=True, type=str,
@@ -230,7 +247,12 @@ def add_generate_options(parser):
     group.add_argument("--action_name", default='', type=str,
                        help="An action name to be generated. If empty, will take text prompts from dataset.")
     group.add_argument("--target_joint_names", default='DIMP_FINAL', type=str, help="Force single joint configuration by specifing the joints (coma separated). If None - will use the random mode for all end effectors.")
-
+    group.add_argument(
+        "--t_amp",
+        default=0.0,
+        type=float,
+        help="Continuous motion amplitude condition."
+    )
 
 def add_edit_options(parser):
     group = parser.add_argument_group('edit')

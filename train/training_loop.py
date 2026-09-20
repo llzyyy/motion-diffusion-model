@@ -209,6 +209,8 @@ class TrainLoop:
         for epoch in range(self.num_epochs):
             print(f'Starting epoch {epoch}')
             for motion, cond in tqdm(self.data):
+                if self.total_step() >= self.num_steps:
+                    break
                 if not (not self.lr_anneal_steps or self.total_step() < self.lr_anneal_steps):
                     break
                 
@@ -242,6 +244,8 @@ class TrainLoop:
                     if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.total_step() > 0:
                         return
                 self.step += 1
+            if self.total_step() >= self.num_steps:
+                break
             if not (not self.lr_anneal_steps or self.total_step() < self.lr_anneal_steps):
                 break
         # Save the last checkpoint if it wasn't already saved.

@@ -136,9 +136,14 @@ class GaussianDiffusion:
         lambda_root_vel=0.,
         lambda_vel_rcxyz=0.,
         lambda_fc=0.,
+
         lambda_target_loc=0.,
         **kargs,
     ):
+        self.lambda_amp = kargs.get(
+            "lambda_amp",
+            0.0
+        )
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
@@ -1221,6 +1226,281 @@ class GaussianDiffusion:
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
+    def _recover_humanml_xyz(
+            self,
+            motion,
+            dataset
+    ):
+        """
+        motion:
+            [B, 263, 1, T]
+            normalized HumanML3D representation
+
+        return:
+            [B, T, 22, 3]
+        """
+
+        # --------------------------------------------------------
+        # [B,263,1,T]
+        # ->
+        # [B,T,263]
+        # --------------------------------------------------------
+
+        motion = (
+            motion
+            .squeeze(2)
+            .permute(0, 2, 1)
+        )
+
+        # --------------------------------------------------------
+        # HumanML3D Mean / Std
+        # --------------------------------------------------------
+
+        mean = torch.as_tensor(
+            dataset.mean,
+            device=motion.device,
+            dtype=motion.dtype
+        ).view(
+            1,
+            1,
+            263
+        )
+
+        std = torch.as_tensor(
+            dataset.std,
+            device=motion.device,
+            dtype=motion.dtype
+        ).view(
+            1,
+            1,
+            263
+        )
+
+        # --------------------------------------------------------
+        # inverse normalization
+        # --------------------------------------------------------
+
+        motion = (
+                motion
+                * std
+                + mean
+        )
+
+        # --------------------------------------------------------
+        # 263D -> XYZ
+        #
+        # [B,T,263]
+        # ->
+        # [B,T,22,3]
+        # --------------------------------------------------------
+
+        xyz = motion_process.recover_from_ric(
+            motion,
+            22
+        )
+
+        return xyz
+
+    def amplitude_loss_humanml(
+            self,
+            pred_motion,
+            target_motion,
+            mask,
+            dataset
+    ):
+        """
+        Explicit right-hand amplitude loss.
+
+        Right shoulder: joint 17
+        Right wrist:    joint 21
+
+        return:
+            amp_loss [B]
+        """
+
+        # ========================================================
+        # Recover XYZ
+        # ========================================================
+
+        pred_xyz = self._recover_humanml_xyz(
+            pred_motion,
+            dataset
+        )
+
+        # target 不需要梯度
+        with torch.no_grad():
+            target_xyz = self._recover_humanml_xyz(
+                target_motion,
+                dataset
+            )
+
+        # ========================================================
+        # Right arm
+        # ========================================================
+
+        RIGHT_SHOULDER = 17
+        RIGHT_WRIST = 21
+
+        pred_rel = (
+                pred_xyz[
+                :,
+                :,
+                RIGHT_WRIST,
+                :
+                ]
+                -
+                pred_xyz[
+                :,
+                :,
+                RIGHT_SHOULDER,
+                :
+                ]
+        )
+
+        target_rel = (
+                target_xyz[
+                :,
+                :,
+                RIGHT_WRIST,
+                :
+                ]
+                -
+                target_xyz[
+                :,
+                :,
+                RIGHT_SHOULDER,
+                :
+                ]
+        )
+
+        # pred_rel / target_rel:
+        #
+        # [B,T,3]
+
+        # ========================================================
+        # 有效 frame mask
+        # ========================================================
+
+        valid = (
+            mask
+            .squeeze(1)
+            .squeeze(1)
+            .float()
+            .unsqueeze(-1)
+        )
+
+        # [B,T,1]
+
+        count = (
+            valid
+            .sum(dim=1)
+            .clamp(min=1.0)
+        )
+
+        # ========================================================
+        # mean relative position
+        # ========================================================
+
+        pred_mean = (
+                            pred_rel
+                            * valid
+                    ).sum(
+            dim=1
+        ) / count
+
+        target_mean = (
+                              target_rel
+                              * valid
+                      ).sum(
+            dim=1
+        ) / count
+
+        # ========================================================
+        # centered trajectory
+        # ========================================================
+
+        pred_centered = (
+                pred_rel
+                -
+                pred_mean.unsqueeze(1)
+        )
+
+        target_centered = (
+                target_rel
+                -
+                target_mean.unsqueeze(1)
+        )
+
+        # ========================================================
+        # RMS amplitude
+        # ========================================================
+
+        pred_sq = (
+                pred_centered ** 2
+        ).sum(
+            dim=-1
+        )
+
+        target_sq = (
+                target_centered ** 2
+        ).sum(
+            dim=-1
+        )
+
+        valid_frame = valid.squeeze(
+            -1
+        )
+
+        frame_count = (
+            valid_frame
+            .sum(dim=1)
+            .clamp(min=1.0)
+        )
+
+        eps = 1e-8
+
+        pred_amp = torch.sqrt(
+            (
+                    pred_sq
+                    * valid_frame
+            ).sum(
+                dim=1
+            )
+            /
+            frame_count
+            +
+            eps
+        )
+
+        target_amp = torch.sqrt(
+            (
+                    target_sq
+                    * valid_frame
+            ).sum(
+                dim=1
+            )
+            /
+            frame_count
+            +
+            eps
+        )
+
+        # ========================================================
+        # L_amp
+        # ========================================================
+
+        amp_loss = torch.abs(
+            pred_amp
+            -
+            target_amp
+        )
+
+        return (
+            amp_loss,
+            pred_amp,
+            target_amp
+        )
+
     def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, dataset=None):
         """
         Compute training losses for a single timestep.
@@ -1298,6 +1578,32 @@ class GaussianDiffusion:
             assert model_output.shape == target.shape == x_start.shape  # [bs, njoints, nfeats, nframes]
 
             terms["rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
+            # ============================================================
+            # Explicit amplitude loss
+            # ============================================================
+
+            if self.lambda_amp > 0.0:
+                amp_loss, amp_pred, amp_target = (
+                    self.amplitude_loss_humanml(
+                        model_output,
+                        target,
+                        mask,
+                        dataset
+                    )
+                )
+
+                terms[
+                    "amp_loss"
+                ] = amp_loss
+
+                # 下面两个只是用于观察，不进入 loss
+                terms[
+                    "amp_pred"
+                ] = amp_pred.detach()
+
+                terms[
+                    "amp_target"
+                ] = amp_target.detach()
 
             target_xyz, model_output_xyz = None, None
 
@@ -1345,13 +1651,60 @@ class GaussianDiffusion:
                                             model_kwargs['y']['lengths'], dataset.t2m_dataset.opt.joints_num, model.all_goal_joint_names, 
                                             model_kwargs['y']['target_joint_names'], model_kwargs['y']['is_heading'])
                 terms["target_loc"] = masked_goal_l2(pred_target, ref_target, model_kwargs['y'], model.all_goal_joint_names)
-                            
 
-            terms["loss"] = terms["rot_mse"] + terms.get('vb', 0.) +\
-                            (self.lambda_vel * terms.get('vel_mse', 0.)) +\
-                            (self.lambda_rcxyz * terms.get('rcxyz_mse', 0.)) + \
-                            (self.lambda_target_loc * terms.get('target_loc', 0.)) + \
-                            (self.lambda_fc * terms.get('fc', 0.))
+            terms["loss"] = (
+                    terms["rot_mse"]
+                    +
+                    terms.get(
+                        "vb",
+                        0.0
+                    )
+                    +
+                    (
+                            self.lambda_vel
+                            *
+                            terms.get(
+                                "vel_mse",
+                                0.0
+                            )
+                    )
+                    +
+                    (
+                            self.lambda_rcxyz
+                            *
+                            terms.get(
+                                "rcxyz_mse",
+                                0.0
+                            )
+                    )
+                    +
+                    (
+                            self.lambda_target_loc
+                            *
+                            terms.get(
+                                "target_loc",
+                                0.0
+                            )
+                    )
+                    +
+                    (
+                            self.lambda_fc
+                            *
+                            terms.get(
+                                "fc",
+                                0.0
+                            )
+                    )
+                    +
+                    (
+                            self.lambda_amp
+                            *
+                            terms.get(
+                                "amp_loss",
+                                0.0
+                            )
+                    )
+            )
 
         else:
             raise NotImplementedError(self.loss_type)
