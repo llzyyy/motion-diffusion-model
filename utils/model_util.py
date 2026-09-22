@@ -109,6 +109,11 @@ def create_gaussian_diffusion(args):
         "lambda_amp",
         0.0
     )
+    lambda_tc = getattr(
+        args,
+        "lambda_tc",
+        0.0
+    )
 
     return SpacedDiffusion(
         use_timesteps=space_timesteps(steps, timestep_respacing),
@@ -132,6 +137,7 @@ def create_gaussian_diffusion(args):
         lambda_fc=args.lambda_fc,
         lambda_target_loc=lambda_target_loc,
         lambda_amp=lambda_amp,
+        lambda_tc=lambda_tc,
     )
 
 def load_saved_model(model, model_path, use_avg: bool=False):  # use_avg_model

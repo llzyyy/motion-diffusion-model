@@ -220,28 +220,34 @@ class MDM(nn.Module):
         # ====================================================
 
         if self.amp_cond:
+            t_amp = (
+                y["t_amp"]
+                if "t_amp" in y
+                else torch.zeros(bs, device=x.device)
+            )
 
-            if 't_amp' in y:
+            amp_emb = self.embed_amp(t_amp)
 
-                t_amp = y['t_amp']
+            # --------------------------------------------------------
+            # Inference-time amplitude condition strength.
+            #
+            # Default = 1.0, so training / old sampling behavior
+            # remains completely unchanged.
+            # --------------------------------------------------------
+            amp_scale = y.get("amp_scale", 1.0)
 
-            else:
-
-                # 没提供幅度时默认 normal
-                t_amp = torch.zeros(
-                    bs,
-                    device=x.device
+            if torch.is_tensor(amp_scale):
+                amp_scale = amp_scale.to(
+                    device=amp_emb.device,
+                    dtype=amp_emb.dtype
                 )
 
-            amp_emb = self.embed_amp(
-                t_amp
-            )
+                if amp_scale.ndim == 1:
+                    amp_scale = amp_scale.unsqueeze(-1)
 
-            time_emb = (
-                time_emb
-                +
-                amp_emb
-            )
+            amp_emb = amp_emb * amp_scale
+
+            time_emb = time_emb + amp_emb
         if 'target_cond' in y.keys():
             # NOTE: We don't use CFG for joints - but we do wat to support uncond sampling for generation and eval!
             time_emb += self.mask_cond(self.embed_target_cond(y['target_cond'], y['target_joint_names'], y['is_heading'])[None], force_mask=y.get('target_uncond', False))  # For uncond support and CFG

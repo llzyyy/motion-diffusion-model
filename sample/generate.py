@@ -122,6 +122,10 @@ def main(args=None):
     # ============================================================
 
     if getattr(args, "amp_cond", False):
+        # --------------------------------------------------------
+        # Continuous amplitude target
+        # --------------------------------------------------------
+
         model_kwargs["y"]["t_amp"] = torch.full(
             (args.batch_size,),
             float(args.t_amp),
@@ -129,8 +133,23 @@ def main(args=None):
             device=dist_util.dev()
         )
 
+        # --------------------------------------------------------
+        # Amplitude conditioning strength gamma
+        # --------------------------------------------------------
+
+        model_kwargs["y"]["amp_scale"] = torch.full(
+            (args.batch_size,),
+            float(args.amp_scale),
+            dtype=torch.float32,
+            device=dist_util.dev()
+        )
+
         print(
             f"Amplitude condition t_amp = {args.t_amp}"
+        )
+
+        print(
+            f"Amplitude scale gamma = {args.amp_scale}"
         )
     init_image = None    
     

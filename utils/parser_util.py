@@ -209,6 +209,12 @@ def add_training_options(parser):
         type=float,
         help="Weight of explicit motion amplitude loss."
     )
+    group.add_argument(
+        "--lambda_tc",
+        default=0.0,
+        type=float,
+        help="Weight of transition consistency loss."
+    )
 def add_sampling_options(parser):
     group = parser.add_argument_group('sampling')
     group.add_argument("--model_path", required=True, type=str,
@@ -252,6 +258,15 @@ def add_generate_options(parser):
         default=0.0,
         type=float,
         help="Continuous motion amplitude condition."
+    )
+    group.add_argument(
+        "--amp_scale",
+        default=1.0,
+        type=float,
+        help=(
+            "Inference-time scale for amplitude conditioning. "
+            "1.0 keeps the original amplitude embedding strength."
+        )
     )
 
 def add_edit_options(parser):

@@ -48,9 +48,9 @@ class AmpWaveDataset(Dataset):
         )
 
         self.dataset_root = (
-            self.project_root
-            / "dataset"
-            / "HumanML3D_amp_wave"
+                self.project_root
+                / "dataset"
+                / "HumanML3D_amp_wave_v2"
         )
 
         self.manifest_path = (

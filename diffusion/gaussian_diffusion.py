@@ -144,6 +144,10 @@ class GaussianDiffusion:
             "lambda_amp",
             0.0
         )
+        self.lambda_tc = kargs.get(
+            "lambda_tc",
+            0.0
+        )
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
@@ -1301,84 +1305,58 @@ class GaussianDiffusion:
 
         return xyz
 
-    def amplitude_loss_humanml(
+    def motion_amplitude_humanml(
             self,
-            pred_motion,
-            target_motion,
+            motion,
             mask,
             dataset
     ):
         """
-        Explicit right-hand amplitude loss.
+        Calculate right-hand RMS motion amplitude.
 
-        Right shoulder: joint 17
-        Right wrist:    joint 21
+        motion:
+            [B, 263, 1, T]
 
         return:
-            amp_loss [B]
+            amplitude [B]
         """
 
         # ========================================================
-        # Recover XYZ
+        # 263D -> XYZ
         # ========================================================
 
-        pred_xyz = self._recover_humanml_xyz(
-            pred_motion,
+        xyz = self._recover_humanml_xyz(
+            motion,
             dataset
         )
 
-        # target 不需要梯度
-        with torch.no_grad():
-            target_xyz = self._recover_humanml_xyz(
-                target_motion,
-                dataset
-            )
-
-        # ========================================================
-        # Right arm
-        # ========================================================
-
+        # HumanML3D joints
         RIGHT_SHOULDER = 17
         RIGHT_WRIST = 21
 
-        pred_rel = (
-                pred_xyz[
-                :,
-                :,
-                RIGHT_WRIST,
-                :
-                ]
-                -
-                pred_xyz[
-                :,
-                :,
-                RIGHT_SHOULDER,
-                :
-                ]
-        )
-
-        target_rel = (
-                target_xyz[
-                :,
-                :,
-                RIGHT_WRIST,
-                :
-                ]
-                -
-                target_xyz[
-                :,
-                :,
-                RIGHT_SHOULDER,
-                :
-                ]
-        )
-
-        # pred_rel / target_rel:
-        #
+        # ========================================================
+        # Wrist position relative to shoulder
         # [B,T,3]
+        # ========================================================
+
+        rel = (
+                xyz[
+                :,
+                :,
+                RIGHT_WRIST,
+                :
+                ]
+                -
+                xyz[
+                :,
+                :,
+                RIGHT_SHOULDER,
+                :
+                ]
+        )
 
         # ========================================================
-        # 有效 frame mask
+        # Valid-frame mask
         # ========================================================
 
         valid = (
@@ -1398,58 +1376,34 @@ class GaussianDiffusion:
         )
 
         # ========================================================
-        # mean relative position
+        # Center trajectory
         # ========================================================
 
-        pred_mean = (
-                            pred_rel
-                            * valid
-                    ).sum(
+        mean_rel = (
+                           rel
+                           *
+                           valid
+                   ).sum(
             dim=1
         ) / count
 
-        target_mean = (
-                              target_rel
-                              * valid
-                      ).sum(
-            dim=1
-        ) / count
-
-        # ========================================================
-        # centered trajectory
-        # ========================================================
-
-        pred_centered = (
-                pred_rel
+        centered = (
+                rel
                 -
-                pred_mean.unsqueeze(1)
-        )
-
-        target_centered = (
-                target_rel
-                -
-                target_mean.unsqueeze(1)
+                mean_rel.unsqueeze(1)
         )
 
         # ========================================================
         # RMS amplitude
         # ========================================================
 
-        pred_sq = (
-                pred_centered ** 2
+        sq = (
+                centered ** 2
         ).sum(
             dim=-1
         )
 
-        target_sq = (
-                target_centered ** 2
-        ).sum(
-            dim=-1
-        )
-
-        valid_frame = valid.squeeze(
-            -1
-        )
+        valid_frame = valid.squeeze(-1)
 
         frame_count = (
             valid_frame
@@ -1459,10 +1413,11 @@ class GaussianDiffusion:
 
         eps = 1e-8
 
-        pred_amp = torch.sqrt(
+        amplitude = torch.sqrt(
             (
-                    pred_sq
-                    * valid_frame
+                    sq
+                    *
+                    valid_frame
             ).sum(
                 dim=1
             )
@@ -1472,18 +1427,46 @@ class GaussianDiffusion:
             eps
         )
 
-        target_amp = torch.sqrt(
-            (
-                    target_sq
-                    * valid_frame
-            ).sum(
-                dim=1
-            )
-            /
-            frame_count
-            +
-            eps
+        return amplitude
+
+    def amplitude_loss_humanml(
+            self,
+            pred_motion,
+            target_motion,
+            mask,
+            dataset
+    ):
+        """
+        Explicit right-hand amplitude loss.
+
+        return:
+            amp_loss   [B]
+            pred_amp   [B]
+            target_amp [B]
+        """
+
+        # ========================================================
+        # Predicted motion amplitude
+        # ========================================================
+
+        pred_amp = self.motion_amplitude_humanml(
+            pred_motion,
+            mask,
+            dataset
         )
+
+        # ========================================================
+        # Ground-truth amplitude
+        #
+        # target does not require gradient
+        # ========================================================
+
+        with torch.no_grad():
+            target_amp = self.motion_amplitude_humanml(
+                target_motion,
+                mask,
+                dataset
+            )
 
         # ========================================================
         # L_amp
@@ -1499,6 +1482,60 @@ class GaussianDiffusion:
             amp_loss,
             pred_amp,
             target_amp
+        )
+
+    def transition_consistency_loss(
+            self,
+            pred_amp,
+            ref_amp,
+            t_amp
+    ):
+        """
+        Generated-reference transition consistency.
+
+        pred_amp:
+            amplitude predicted with t_amp
+
+        ref_amp:
+            amplitude predicted with t_amp = 0
+
+        t_amp:
+            desired amplitude transition
+
+        The predicted transition is:
+
+            (A_pred - A_ref) / A_ref
+        """
+
+        eps = 1e-8
+
+        # ========================================================
+        # Predicted relative transition
+        # ========================================================
+
+        pred_transition = (
+                                  pred_amp
+                                  -
+                                  ref_amp
+                          ) / (
+                                  ref_amp
+                                  +
+                                  eps
+                          )
+
+        # ========================================================
+        # L_TC
+        # ========================================================
+
+        tc_loss = torch.abs(
+            pred_transition
+            -
+            t_amp
+        )
+
+        return (
+            tc_loss,
+            pred_transition
         )
 
     def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, dataset=None):
@@ -1544,7 +1581,35 @@ class GaussianDiffusion:
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+            # ============================================================
+            # Save RNG state
+            #
+            # We will later run the reference branch using exactly the
+            # same random dropout / condition masking.
+            # Therefore the intentional difference between the two
+            # branches is only t_amp.
+            # ============================================================
+
+            cpu_rng_state = torch.get_rng_state()
+
+            if x_t.is_cuda:
+                cuda_rng_state = torch.cuda.get_rng_state(
+                    x_t.device
+                )
+            else:
+                cuda_rng_state = None
+
+            # ============================================================
+            # Main amplitude-conditioned branch
+            #
+            # t_amp = actual requested transition
+            # ============================================================
+
+            model_output = model(
+                x_t,
+                self._scale_timesteps(t),
+                **model_kwargs
+            )
 
             if self.model_var_type in [
                 ModelVarType.LEARNED,
@@ -1606,6 +1671,171 @@ class GaussianDiffusion:
                 ] = amp_target.detach()
 
             target_xyz, model_output_xyz = None, None
+            # ============================================================
+            # Amplitude computation
+            #
+            # Both L_amp and L_TC need the amplitude of model_output.
+            # ============================================================
+
+            amp_pred = None
+            amp_target = None
+
+            if (
+                    self.lambda_amp > 0.0
+                    or
+                    self.lambda_tc > 0.0
+            ):
+                amp_loss, amp_pred, amp_target = (
+                    self.amplitude_loss_humanml(
+                        model_output,
+                        target,
+                        mask,
+                        dataset
+                    )
+                )
+
+            # ============================================================
+            # L_amp
+            #
+            # Absolute target amplitude consistency
+            # ============================================================
+
+            if self.lambda_amp > 0.0:
+                terms["amp_loss"] = amp_loss
+
+                terms["amp_pred"] = (
+                    amp_pred.detach()
+                )
+
+                terms["amp_target"] = (
+                    amp_target.detach()
+                )
+
+            # ============================================================
+            # L_TC
+            #
+            # Generated-reference transition consistency
+            #
+            # Main branch:
+            #
+            #   G(x_t, text, t_amp)
+            #
+            # Reference branch:
+            #
+            #   G(x_t, text, 0)
+            #
+            # Same x_t
+            # Same diffusion timestep
+            # Same text
+            # Same stochastic dropout
+            #
+            # Only t_amp is different.
+            # ============================================================
+
+            if self.lambda_tc > 0.0:
+
+                t_amp = model_kwargs[
+                    "y"
+                ][
+                    "t_amp"
+                ].float()
+
+                # --------------------------------------------------------
+                # Create reference model kwargs
+                #
+                # Do NOT directly modify model_kwargs,
+                # because it belongs to the main branch.
+                # --------------------------------------------------------
+
+                ref_model_kwargs = dict(
+                    model_kwargs
+                )
+
+                ref_y = dict(
+                    model_kwargs["y"]
+                )
+
+                # Normal/reference amplitude condition
+                ref_y["t_amp"] = torch.zeros_like(
+                    t_amp
+                )
+
+                ref_model_kwargs["y"] = ref_y
+
+                # --------------------------------------------------------
+                # Restore RNG state
+                #
+                # This makes the reference branch use the same dropout
+                # pattern as the main t_amp branch.
+                # --------------------------------------------------------
+
+                torch.set_rng_state(
+                    cpu_rng_state
+                )
+
+                if cuda_rng_state is not None:
+                    torch.cuda.set_rng_state(
+                        cuda_rng_state,
+                        device=x_t.device
+                    )
+
+                # --------------------------------------------------------
+                # Reference forward
+                #
+                # We use no_grad:
+                #
+                # reference branch is an anchor;
+                # L_TC only pushes the amplitude-conditioned branch.
+                # --------------------------------------------------------
+
+                with torch.no_grad():
+
+                    ref_model_output = model(
+                        x_t,
+                        self._scale_timesteps(t),
+                        **ref_model_kwargs
+                    )
+
+                    ref_amp = self.motion_amplitude_humanml(
+                        ref_model_output,
+                        mask,
+                        dataset
+                    )
+
+                # --------------------------------------------------------
+                # Transition consistency
+                #
+                # t_pred =
+                #
+                # (A(t_amp) - A(0))
+                # -----------------
+                #        A(0)
+                #
+                # --------------------------------------------------------
+
+                (
+                    tc_loss,
+                    tc_pred
+                ) = self.transition_consistency_loss(
+                    amp_pred,
+                    ref_amp,
+                    t_amp
+                )
+
+                terms["tc_loss"] = tc_loss
+
+                # Logging only
+                terms["tc_pred"] = (
+                    tc_pred.detach()
+                )
+
+                terms["tc_target"] = (
+                    t_amp.detach()
+                )
+
+                terms["ref_amp"] = (
+                    ref_amp.detach()
+                )
 
             if self.lambda_rcxyz > 0.:
                 target_xyz = get_xyz(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
@@ -1701,6 +1931,15 @@ class GaussianDiffusion:
                             *
                             terms.get(
                                 "amp_loss",
+                                0.0
+                            )
+                    )
+                    +
+                    (
+                            self.lambda_tc
+                            *
+                            terms.get(
+                                "tc_loss",
                                 0.0
                             )
                     )
