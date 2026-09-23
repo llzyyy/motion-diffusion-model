@@ -215,6 +215,23 @@ def add_training_options(parser):
         type=float,
         help="Weight of transition consistency loss."
     )
+    group.add_argument(
+        "--multi_tc",
+        action="store_true",
+        help=(
+            "Enable two-timestep transition consistency loss."
+        )
+    )
+
+    group.add_argument(
+        "--tc_cross_beta",
+        default=0.1,
+        type=float,
+        help=(
+            "Weight of cross-timestep transition consistency "
+            "inside multi-step L_TC."
+        )
+    )
 def add_sampling_options(parser):
     group = parser.add_argument_group('sampling')
     group.add_argument("--model_path", required=True, type=str,

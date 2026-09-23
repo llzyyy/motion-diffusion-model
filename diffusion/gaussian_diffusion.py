@@ -148,6 +148,20 @@ class GaussianDiffusion:
             "lambda_tc",
             0.0
         )
+
+        # ============================================================
+        # Multi-timestep transition consistency
+        # ============================================================
+
+        self.multi_tc = kargs.get(
+            "multi_tc",
+            False
+        )
+
+        self.tc_cross_beta = kargs.get(
+            "tc_cross_beta",
+            0.1
+        )
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
@@ -1643,32 +1657,7 @@ class GaussianDiffusion:
             assert model_output.shape == target.shape == x_start.shape  # [bs, njoints, nfeats, nframes]
 
             terms["rot_mse"] = self.masked_l2(target, model_output, mask) # mean_flat(rot_mse)
-            # ============================================================
-            # Explicit amplitude loss
-            # ============================================================
 
-            if self.lambda_amp > 0.0:
-                amp_loss, amp_pred, amp_target = (
-                    self.amplitude_loss_humanml(
-                        model_output,
-                        target,
-                        mask,
-                        dataset
-                    )
-                )
-
-                terms[
-                    "amp_loss"
-                ] = amp_loss
-
-                # 下面两个只是用于观察，不进入 loss
-                terms[
-                    "amp_pred"
-                ] = amp_pred.detach()
-
-                terms[
-                    "amp_target"
-                ] = amp_target.detach()
 
             target_xyz, model_output_xyz = None, None
             # ============================================================
@@ -1714,25 +1703,29 @@ class GaussianDiffusion:
             # ============================================================
             # L_TC
             #
-            # Generated-reference transition consistency
+            # Single-timestep:
             #
-            # Main branch:
+            #   t1 = original diffusion timestep
             #
-            #   G(x_t, text, t_amp)
+            # Multi-timestep:
             #
-            # Reference branch:
+            #   t1 = original diffusion timestep
+            #   t2 = timestep sampled from the opposite half
             #
-            #   G(x_t, text, 0)
+            # Both timesteps use:
             #
-            # Same x_t
-            # Same diffusion timestep
-            # Same text
-            # Same stochastic dropout
+            #   same x_start
+            #   same Gaussian noise
+            #   same text
+            #   same t_amp
             #
-            # Only t_amp is different.
             # ============================================================
 
             if self.lambda_tc > 0.0:
+
+                # ========================================================
+                # Target amplitude transition
+                # ========================================================
 
                 t_amp = model_kwargs[
                     "y"
@@ -1740,12 +1733,12 @@ class GaussianDiffusion:
                     "t_amp"
                 ].float()
 
-                # --------------------------------------------------------
-                # Create reference model kwargs
+                # ========================================================
+                # Reference kwargs:
                 #
-                # Do NOT directly modify model_kwargs,
-                # because it belongs to the main branch.
-                # --------------------------------------------------------
+                # same text / same conditions,
+                # only t_amp -> 0
+                # ========================================================
 
                 ref_model_kwargs = dict(
                     model_kwargs
@@ -1755,18 +1748,36 @@ class GaussianDiffusion:
                     model_kwargs["y"]
                 )
 
-                # Normal/reference amplitude condition
-                ref_y["t_amp"] = torch.zeros_like(
+                ref_y[
+                    "t_amp"
+                ] = torch.zeros_like(
                     t_amp
                 )
 
-                ref_model_kwargs["y"] = ref_y
+                ref_model_kwargs[
+                    "y"
+                ] = ref_y
+
+                # ========================================================
+                # STEP 1
+                #
+                # The main branch at t1 has already been computed:
+                #
+                #   model_output
+                #   amp_pred
+                #
+                # So we only need the t_amp = 0 reference.
+                # ========================================================
 
                 # --------------------------------------------------------
-                # Restore RNG state
+                # Restore RNG state saved before the main forward.
                 #
-                # This makes the reference branch use the same dropout
-                # pattern as the main t_amp branch.
+                # Therefore:
+                #
+                # G(x_t1, t_amp)
+                # G(x_t1, 0)
+                #
+                # use the same dropout / condition masking.
                 # --------------------------------------------------------
 
                 torch.set_rng_state(
@@ -1780,63 +1791,415 @@ class GaussianDiffusion:
                     )
 
                 # --------------------------------------------------------
-                # Reference forward
-                #
-                # We use no_grad:
-                #
-                # reference branch is an anchor;
-                # L_TC only pushes the amplitude-conditioned branch.
+                # Reference branch at t1
                 # --------------------------------------------------------
 
                 with torch.no_grad():
 
-                    ref_model_output = model(
+                    ref_model_output_1 = model(
                         x_t,
                         self._scale_timesteps(t),
                         **ref_model_kwargs
                     )
 
-                    ref_amp = self.motion_amplitude_humanml(
-                        ref_model_output,
-                        mask,
-                        dataset
+                    # MDM currently uses FIXED variance,
+                    # but keep compatibility with learned variance.
+                    if self.model_var_type in [
+                        ModelVarType.LEARNED,
+                        ModelVarType.LEARNED_RANGE,
+                    ]:
+                        B, C = x_t.shape[:2]
+
+                        ref_model_output_1, _ = th.split(
+                            ref_model_output_1,
+                            C,
+                            dim=1
+                        )
+
+                    ref_amp_1 = (
+                        self.motion_amplitude_humanml(
+                            ref_model_output_1,
+                            mask,
+                            dataset
+                        )
                     )
 
                 # --------------------------------------------------------
-                # Transition consistency
-                #
-                # t_pred =
-                #
-                # (A(t_amp) - A(0))
-                # -----------------
-                #        A(0)
-                #
+                # Transition at timestep t1
                 # --------------------------------------------------------
 
                 (
-                    tc_loss,
-                    tc_pred
+                    tc_loss_1,
+                    tc_pred_1
                 ) = self.transition_consistency_loss(
                     amp_pred,
-                    ref_amp,
+                    ref_amp_1,
                     t_amp
                 )
 
-                terms["tc_loss"] = tc_loss
+                # ========================================================
+                # Original single-timestep mode
+                # ========================================================
 
-                # Logging only
-                terms["tc_pred"] = (
-                    tc_pred.detach()
-                )
+                if not self.multi_tc:
 
-                terms["tc_target"] = (
-                    t_amp.detach()
-                )
+                    terms[
+                        "tc_loss"
+                    ] = tc_loss_1
 
-                terms["ref_amp"] = (
-                    ref_amp.detach()
-                )
+                    terms[
+                        "tc_pred"
+                    ] = tc_pred_1.detach()
 
+                    terms[
+                        "tc_target"
+                    ] = t_amp.detach()
+
+                    terms[
+                        "ref_amp"
+                    ] = ref_amp_1.detach()
+
+                # ========================================================
+                # Multi-timestep mode
+                # ========================================================
+
+                else:
+
+                    # ====================================================
+                    # Select t2 from the opposite half of the
+                    # diffusion process.
+                    #
+                    # If t1 is low:
+                    #
+                    #   t2 -> high half
+                    #
+                    # If t1 is high:
+                    #
+                    #   t2 -> low half
+                    #
+                    # This guarantees that t1 and t2 are meaningfully
+                    # separated.
+                    # ====================================================
+
+                    half = (
+                            self.num_timesteps
+                            //
+                            2
+                    )
+
+                    # Random timestep in lower half
+                    t_low = th.randint(
+                        low=0,
+                        high=half,
+                        size=t.shape,
+                        device=t.device,
+                        dtype=t.dtype
+                    )
+
+                    # Random timestep in upper half
+                    t_high = th.randint(
+                        low=half,
+                        high=self.num_timesteps,
+                        size=t.shape,
+                        device=t.device,
+                        dtype=t.dtype
+                    )
+
+                    # If original t is low -> choose high.
+                    # If original t is high -> choose low.
+                    t2 = th.where(
+                        t < half,
+                        t_high,
+                        t_low
+                    )
+
+                    # ====================================================
+                    # IMPORTANT:
+                    #
+                    # Construct x_t2 using exactly the SAME noise
+                    # used for x_t1.
+                    #
+                    # x_t1 = q(x_t1 | x0, noise)
+                    # x_t2 = q(x_t2 | x0, noise)
+                    #
+                    # Therefore the main difference is diffusion timestep,
+                    # rather than a different random noise realization.
+                    # ====================================================
+
+                    x_t2 = self.q_sample(
+                        x_start,
+                        t2,
+                        noise=noise
+                    )
+
+                    # ====================================================
+                    # Save global RNG state AFTER sampling t2.
+                    #
+                    # We restore this at the end, so the extra model
+                    # forwards do not unexpectedly disturb future
+                    # training randomness.
+                    # ====================================================
+
+                    cpu_rng_after_t2 = (
+                        torch.get_rng_state()
+                    )
+
+                    if x_t2.is_cuda:
+
+                        cuda_rng_after_t2 = (
+                            torch.cuda.get_rng_state(
+                                x_t2.device
+                            )
+                        )
+
+                    else:
+
+                        cuda_rng_after_t2 = None
+
+                    # ====================================================
+                    # STEP 2 - Main amplitude-conditioned branch
+                    #
+                    # Restore the same RNG state that was used by t1.
+                    #
+                    # This makes t1 and t2 use the same stochastic
+                    # dropout / condition masking pattern.
+                    # ====================================================
+
+                    torch.set_rng_state(
+                        cpu_rng_state
+                    )
+
+                    if cuda_rng_state is not None:
+                        torch.cuda.set_rng_state(
+                            cuda_rng_state,
+                            device=x_t2.device
+                        )
+
+                    model_output_2 = model(
+                        x_t2,
+                        self._scale_timesteps(
+                            t2
+                        ),
+                        **model_kwargs
+                    )
+
+                    # ----------------------------------------------------
+                    # Compatibility with learned variance
+                    # ----------------------------------------------------
+
+                    if self.model_var_type in [
+                        ModelVarType.LEARNED,
+                        ModelVarType.LEARNED_RANGE,
+                    ]:
+                        B, C = x_t2.shape[:2]
+
+                        model_output_2, _ = th.split(
+                            model_output_2,
+                            C,
+                            dim=1
+                        )
+
+                    # ----------------------------------------------------
+                    # Amplitude predicted at t2
+                    # ----------------------------------------------------
+
+                    amp_pred_2 = (
+                        self.motion_amplitude_humanml(
+                            model_output_2,
+                            mask,
+                            dataset
+                        )
+                    )
+
+                    # ====================================================
+                    # STEP 2 - Reference branch
+                    #
+                    # Restore exactly the same RNG again so:
+                    #
+                    # G(x_t2, t_amp)
+                    # G(x_t2, 0)
+                    #
+                    # use identical dropout / masking.
+                    # ====================================================
+
+                    torch.set_rng_state(
+                        cpu_rng_state
+                    )
+
+                    if cuda_rng_state is not None:
+                        torch.cuda.set_rng_state(
+                            cuda_rng_state,
+                            device=x_t2.device
+                        )
+
+                    with torch.no_grad():
+
+                        ref_model_output_2 = model(
+                            x_t2,
+                            self._scale_timesteps(
+                                t2
+                            ),
+                            **ref_model_kwargs
+                        )
+
+                        if self.model_var_type in [
+                            ModelVarType.LEARNED,
+                            ModelVarType.LEARNED_RANGE,
+                        ]:
+                            B, C = x_t2.shape[:2]
+
+                            ref_model_output_2, _ = th.split(
+                                ref_model_output_2,
+                                C,
+                                dim=1
+                            )
+
+                        ref_amp_2 = (
+                            self.motion_amplitude_humanml(
+                                ref_model_output_2,
+                                mask,
+                                dataset
+                            )
+                        )
+
+                    # ====================================================
+                    # Restore normal RNG stream
+                    # ====================================================
+
+                    torch.set_rng_state(
+                        cpu_rng_after_t2
+                    )
+
+                    if cuda_rng_after_t2 is not None:
+                        torch.cuda.set_rng_state(
+                            cuda_rng_after_t2,
+                            device=x_t2.device
+                        )
+
+                    # ====================================================
+                    # Transition at timestep t2
+                    # ====================================================
+
+                    (
+                        tc_loss_2,
+                        tc_pred_2
+                    ) = self.transition_consistency_loss(
+                        amp_pred_2,
+                        ref_amp_2,
+                        t_amp
+                    )
+
+                    # ====================================================
+                    # Cross-timestep consistency
+                    #
+                    # t_hat(t1) should be close to t_hat(t2)
+                    # ====================================================
+
+                    tc_cross_loss = torch.abs(
+                        tc_pred_1
+                        -
+                        tc_pred_2
+                    )
+
+                    # ====================================================
+                    # Final multi-timestep TC
+                    #
+                    # L_TC_multi =
+                    #
+                    # 0.5 * (
+                    #   |t_hat_1 - t_target|
+                    # + |t_hat_2 - t_target|
+                    # )
+                    #
+                    # + beta * |t_hat_1 - t_hat_2|
+                    # ====================================================
+
+                    tc_loss = (
+                            0.5
+                            *
+                            (
+                                    tc_loss_1
+                                    +
+                                    tc_loss_2
+                            )
+                            +
+                            self.tc_cross_beta
+                            *
+                            tc_cross_loss
+                    )
+
+                    # ====================================================
+                    # Main loss term
+                    # ====================================================
+
+                    terms[
+                        "tc_loss"
+                    ] = tc_loss
+
+                    # ====================================================
+                    # Logging
+                    # ====================================================
+
+                    # Mean prediction across two diffusion timesteps
+                    terms[
+                        "tc_pred"
+                    ] = (
+                            0.5
+                            *
+                            (
+                                    tc_pred_1
+                                    +
+                                    tc_pred_2
+                            )
+                    ).detach()
+
+                    terms[
+                        "tc_target"
+                    ] = t_amp.detach()
+
+                    terms[
+                        "ref_amp"
+                    ] = (
+                            0.5
+                            *
+                            (
+                                    ref_amp_1
+                                    +
+                                    ref_amp_2
+                            )
+                    ).detach()
+
+                    # ----------------------------------------------------
+                    # Detailed multi-step diagnostics
+                    # ----------------------------------------------------
+
+                    terms[
+                        "tc_loss_t1"
+                    ] = tc_loss_1.detach()
+
+                    terms[
+                        "tc_loss_t2"
+                    ] = tc_loss_2.detach()
+
+                    terms[
+                        "tc_cross"
+                    ] = tc_cross_loss.detach()
+
+                    terms[
+                        "tc_pred_t1"
+                    ] = tc_pred_1.detach()
+
+                    terms[
+                        "tc_pred_t2"
+                    ] = tc_pred_2.detach()
+
+                    terms[
+                        "tc_t1"
+                    ] = t.float().detach()
+
+                    terms[
+                        "tc_t2"
+                    ] = t2.float().detach()
             if self.lambda_rcxyz > 0.:
                 target_xyz = get_xyz(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
                 model_output_xyz = get_xyz(model_output)  # [bs, nvertices, 3, nframes]
