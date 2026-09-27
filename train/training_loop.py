@@ -249,7 +249,15 @@ class TrainLoop:
                         else:
                             self.train_platform.report_scalar(name=k, value=v, iteration=self.total_step(), group_name='Loss')
 
-                if self.total_step() % self.save_interval == 0:
+                if (
+                        self.total_step() > 0
+                        and
+                        self.total_step()
+                        %
+                        self.save_interval
+                        ==
+                        0
+                ):
                     self.save()
                     self.model.eval()
                     if self.args.use_ema:
@@ -446,26 +454,56 @@ class TrainLoop:
                 del_clip(state_dict_avg)
                 state_dict = {'model': state_dict, 'model_avg': state_dict_avg}
 
-            logger.log(f"saving model...")
+            logger.log(
+                f"saving model..."
+            )
+
             filename = self.ckpt_file_name()
-            with bf.BlobFile(bf.join(self.save_dir, filename), "wb") as f:
-                torch.save(state_dict, f)
+
+            checkpoint_path = os.path.join(
+                self.save_dir,
+                filename
+            )
+
+            with open(
+                    checkpoint_path,
+                    "wb"
+            ) as f:
+
+                torch.save(
+                    state_dict,
+                    f
+                )
 
         save_checkpoint()
 
-        with bf.BlobFile(
-            bf.join(self.save_dir, f"opt{(self.total_step()):09d}.pt"),
-            "wb",
+        optimizer_path = os.path.join(
+            self.save_dir,
+            f"opt{(self.total_step()):09d}.pt"
+        )
+
+        with open(
+                optimizer_path,
+                "wb"
         ) as f:
-            opt_state = self.opt.state_dict()
+
+            opt_state = (
+                self.opt.state_dict()
+            )
+
             if self.use_fp16:
-                # with fp16 we also save the state dict
                 opt_state = {
-                    'opt': opt_state,
-                    'scaler': self.scaler.state_dict(),
+                    "opt":
+                        opt_state,
+
+                    "scaler":
+                        self.scaler.state_dict(),
                 }
 
-            torch.save(opt_state, f)
+            torch.save(
+                opt_state,
+                f
+            )
 
 
 def parse_resume_step_from_filename(filename):

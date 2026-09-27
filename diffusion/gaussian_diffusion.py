@@ -18,6 +18,9 @@ from diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
 from data_loaders.humanml.scripts import motion_process
 from utils.loss_util import masked_l2, masked_goal_l2
 from data_loaders.humanml.scripts.motion_process import get_target_location
+from utils.general_amplitude import (
+    general_motion_amplitude_humanml,
+)
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, scale_betas=1.):
     """
@@ -1668,19 +1671,80 @@ class GaussianDiffusion:
 
             amp_pred = None
             amp_target = None
+            amp_loss = None
+
+            y_amp = model_kwargs.get(
+                "y",
+                {}
+            )
+
+            general_amp_keys = (
+                "amp_mask",
+                "local_offsets",
+                "body_height",
+            )
+
+            use_general_amp = all(
+                key in y_amp
+                for key in general_amp_keys
+            )
+
+            def evaluate_amp(
+                    motion_tensor
+            ):
+
+                if use_general_amp:
+                    return general_motion_amplitude_humanml(
+                        motion=
+                        motion_tensor,
+
+                        valid_mask=
+                        mask,
+
+                        dataset=
+                        dataset,
+
+                        amp_mask=
+                        y_amp[
+                            "amp_mask"
+                        ],
+
+                        local_offsets=
+                        y_amp[
+                            "local_offsets"
+                        ],
+
+                        body_height=
+                        y_amp[
+                            "body_height"
+                        ],
+                    )
+
+                # Keep old wave training compatible.
+                return self.motion_amplitude_humanml(
+                    motion_tensor,
+                    mask,
+                    dataset
+                )
 
             if (
                     self.lambda_amp > 0.0
                     or
                     self.lambda_tc > 0.0
             ):
-                amp_loss, amp_pred, amp_target = (
-                    self.amplitude_loss_humanml(
-                        model_output,
-                        target,
-                        mask,
-                        dataset
+                amp_pred = evaluate_amp(
+                    model_output
+                )
+
+                with torch.no_grad():
+                    amp_target = evaluate_amp(
+                        target
                     )
+
+                amp_loss = torch.abs(
+                    amp_pred
+                    -
+                    amp_target
                 )
 
             # ============================================================
@@ -1817,10 +1881,8 @@ class GaussianDiffusion:
                         )
 
                     ref_amp_1 = (
-                        self.motion_amplitude_humanml(
-                            ref_model_output_1,
-                            mask,
-                            dataset
+                        evaluate_amp(
+                            ref_model_output_1
                         )
                     )
 
@@ -2004,10 +2066,8 @@ class GaussianDiffusion:
                     # ----------------------------------------------------
 
                     amp_pred_2 = (
-                        self.motion_amplitude_humanml(
-                            model_output_2,
-                            mask,
-                            dataset
+                        evaluate_amp(
+                            model_output_2
                         )
                     )
 
@@ -2055,13 +2115,10 @@ class GaussianDiffusion:
                             )
 
                         ref_amp_2 = (
-                            self.motion_amplitude_humanml(
-                                ref_model_output_2,
-                                mask,
-                                dataset
+                            evaluate_amp(
+                                ref_model_output_2
                             )
                         )
-
                     # ====================================================
                     # Restore normal RNG stream
                     # ====================================================

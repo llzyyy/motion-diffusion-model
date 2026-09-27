@@ -9,13 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-from general_amp_allocator_v3 import (
-    build_amplitude_mask_v3,
-)
-from general_amp_evaluator_v2 import (
-    build_frozen_local_offsets,
-    compute_general_amplitude_v2,
-)
+
 
 # ============================================================
 # Project path
@@ -34,6 +28,20 @@ if str(PROJECT_ROOT) not in sys.path:
         0,
         str(PROJECT_ROOT)
     )
+
+
+# ============================================================
+# General amplitude modules
+# ============================================================
+
+from general_amp_allocator_v3 import (
+    build_amplitude_mask_v3,
+)
+
+from general_amp_evaluator_v2 import (
+    build_frozen_local_offsets,
+    compute_general_amplitude_v2,
+)
 
 
 # ============================================================
@@ -404,6 +412,11 @@ ACTION_SPECS = {
             r"\bgrab(?:s|bed|bing)?\b",
 
             r"\breach(?:es|ed|ing)?\b",
+            r"\bbackfist\b",
+            r"\bback[\s-]?fist\b",
+            r"\bfist\b",
+            r"\bstrike(?:s|d|ing)?\b",
+            r"\bhit(?:s|ting)?\b",
 
         ],
     },
@@ -3439,6 +3452,20 @@ def build_motion_group(
         mask_path,
         saved_amp_mask
     )
+    local_offsets_path = (
+            output_root
+            /
+            "local_offsets"
+            /
+            f"{motion_id}.npy"
+    )
+
+    np.save(
+        local_offsets_path,
+        frozen_local_offsets.astype(
+            np.float32
+        )
+    )
 
     # ========================================================
     # Save 9 variants
@@ -3587,6 +3614,10 @@ def build_motion_group(
                     path_for_manifest(
                         mask_path
                     ),
+                "local_offsets_path":
+                    path_for_manifest(
+                        local_offsets_path
+                    ),
 
                 "vec_path":
                     path_for_manifest(
@@ -3661,6 +3692,10 @@ def build_motion_group(
         "normal_amp":
             float(
                 normal_amp
+            ),
+        "local_offsets_path":
+            path_for_manifest(
+                local_offsets_path
             ),
 
         "mask_mean":
@@ -3846,6 +3881,7 @@ def main():
         "new_joint_vecs",
         "new_joints",
         "amp_masks",
+        "local_offsets",
     ]:
 
         (

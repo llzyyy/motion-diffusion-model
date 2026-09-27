@@ -204,6 +204,12 @@ def add_training_options(parser):
         help="Pretrained MDM checkpoint used to initialize amplitude fine-tuning."
     )
     group.add_argument(
+        "--amp_dataset_root",
+        default="",
+        type=str,
+        help="Path to the General Amplitude dataset root."
+    )
+    group.add_argument(
         "--lambda_amp",
         default=0.0,
         type=float,
