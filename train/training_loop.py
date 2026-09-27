@@ -179,14 +179,34 @@ class TrainLoop:
                     # for the rest
                     state_dict = state_dict['opt']
 
-            tgt_wd = self.opt.param_groups[0]['weight_decay']
-            print('target weight decay:', tgt_wd)
+            # 保存本次命令行指定的新超参数
+            tgt_wd = self.weight_decay
+            tgt_lr = self.lr
+
+            print("target weight decay:", tgt_wd)
+            print("target learning rate:", tgt_lr)
+
+            # 恢复 Adam 的 momentum / variance 等状态
             self.opt.load_state_dict(state_dict)
-            print('loaded weight decay (will be replaced):',
-                  self.opt.param_groups[0]['weight_decay'])
-            # preserve the weight decay parameter
+
+            print(
+                "loaded learning rate from checkpoint:",
+                self.opt.param_groups[0]["lr"]
+            )
+
+            # ------------------------------------------------------------
+            # 重要：
+            # optimizer checkpoint 会把旧 lr 一起恢复。
+            # 这里重新使用本次 fine-tuning 指定的新 lr。
+            # ------------------------------------------------------------
             for group in self.opt.param_groups:
-                group['weight_decay'] = tgt_wd
+                group["weight_decay"] = tgt_wd
+                group["lr"] = tgt_lr
+
+            print(
+                "fine-tuning learning rate:",
+                self.opt.param_groups[0]["lr"]
+            )
             self.opt.param_groups[0]['capturable'] = True
 
     def cond_modifiers(self, cond, motion):
