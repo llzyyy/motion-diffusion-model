@@ -12,7 +12,10 @@ from tqdm import tqdm
 from general_amp_allocator_v3 import (
     build_amplitude_mask_v3,
 )
-
+from general_amp_evaluator_v2 import (
+    build_frozen_local_offsets,
+    compute_general_amplitude_v2,
+)
 
 # ============================================================
 # Project path
@@ -1984,32 +1987,37 @@ def compute_general_amplitude(
 class AlphaEvaluator:
 
     def __init__(
-        self,
-        base_components,
-        frozen_amp_mask,
-        body_height,
-        normal_amp
+                self,
+                base_components,
+                frozen_amp_mask,
+                frozen_local_offsets,
+                body_height,
+                normal_amp
     ):
-
         self.base_components = (
-            base_components
+                base_components
         )
 
         self.frozen_amp_mask = (
-            frozen_amp_mask
+                frozen_amp_mask
+        )
+
+        self.frozen_local_offsets = (
+                frozen_local_offsets
         )
 
         self.body_height = float(
-            body_height
+                body_height
         )
 
         self.normal_amp = float(
-            normal_amp
+                normal_amp
         )
 
         self.cache = {}
 
         self.errors = {}
+
 
     def evaluate(
         self,
@@ -2076,9 +2084,20 @@ class AlphaEvaluator:
                 return None
 
             amp = (
-                compute_general_amplitude(
+                compute_general_amplitude_v2(
+                    components=
                     recovered_components,
+
+                    vec=
+                    vec,
+
+                    frozen_amp_mask=
                     self.frozen_amp_mask,
+
+                    frozen_local_offsets=
+                    self.frozen_local_offsets,
+
+                    body_height=
                     self.body_height
                 )
             )
@@ -3101,6 +3120,23 @@ def build_motion_group(
         body_height,
         args.window_frames
     )
+    # ========================================================
+    # Frozen local bone offsets for Evaluator V2
+    # ========================================================
+
+    frozen_local_offsets = (
+        build_frozen_local_offsets(
+            base_components
+        )
+    )
+
+    if not np.isfinite(
+            frozen_local_offsets
+    ).all():
+        return (
+            None,
+            "Frozen local offsets contain NaN/Inf"
+        )
 
     if frozen_amp_mask is None:
         return (
@@ -3192,9 +3228,20 @@ def build_motion_group(
         )
 
     normal_amp = (
-        compute_general_amplitude(
+        compute_general_amplitude_v2(
+            components=
             normal_components,
+
+            vec=
+            normal_vec,
+
+            frozen_amp_mask=
             frozen_amp_mask,
+
+            frozen_local_offsets=
+            frozen_local_offsets,
+
+            body_height=
             body_height
         )
     )
@@ -3222,16 +3269,19 @@ def build_motion_group(
     evaluator = AlphaEvaluator(
 
         base_components=
-            base_components,
+        base_components,
 
         frozen_amp_mask=
-            frozen_amp_mask,
+        frozen_amp_mask,
+
+        frozen_local_offsets=
+        frozen_local_offsets,
 
         body_height=
-            body_height,
+        body_height,
 
         normal_amp=
-            normal_amp
+        normal_amp
     )
 
     # Reuse the already computed normal round-trip.
