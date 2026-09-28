@@ -160,55 +160,104 @@ class TrainLoop:
             # )
 
     def _load_optimizer_state(self):
-        main_checkpoint = self.find_resume_checkpoint() or self.resume_checkpoint
-        opt_checkpoint = bf.join(
-            bf.dirname(main_checkpoint), f"opt{self.resume_step:09}.pt"
+
+        main_checkpoint = (
+                self.find_resume_checkpoint()
+                or
+                self.resume_checkpoint
         )
-        if bf.exists(opt_checkpoint):
-            logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
+
+        opt_checkpoint = os.path.join(
+            os.path.dirname(
+                main_checkpoint
+            ),
+            f"opt{self.resume_step:09d}.pt"
+        )
+
+        if os.path.exists(
+                opt_checkpoint
+        ):
+
+            logger.log(
+                f"loading optimizer state from checkpoint: "
+                f"{opt_checkpoint}"
+            )
+
             state_dict = dist_util.load_state_dict(
-                opt_checkpoint, map_location=dist_util.dev()
+                opt_checkpoint,
+                map_location=dist_util.dev()
             )
 
             if self.use_fp16:
-                if 'scaler' not in state_dict:
-                    print("scaler state not found ... not loading it.")
-                else:
-                    # load grad scaler state
-                    self.scaler.load_state_dict(state_dict['scaler'])
-                    # for the rest
-                    state_dict = state_dict['opt']
 
-            # 保存本次命令行指定的新超参数
+                if "scaler" not in state_dict:
+
+                    print(
+                        "scaler state not found ... "
+                        "not loading it."
+                    )
+
+                else:
+
+                    self.scaler.load_state_dict(
+                        state_dict[
+                            "scaler"
+                        ]
+                    )
+
+                    state_dict = state_dict[
+                        "opt"
+                    ]
+
             tgt_wd = self.weight_decay
             tgt_lr = self.lr
 
-            print("target weight decay:", tgt_wd)
-            print("target learning rate:", tgt_lr)
+            print(
+                "target weight decay:",
+                tgt_wd
+            )
 
-            # 恢复 Adam 的 momentum / variance 等状态
-            self.opt.load_state_dict(state_dict)
+            print(
+                "target learning rate:",
+                tgt_lr
+            )
+
+            self.opt.load_state_dict(
+                state_dict
+            )
 
             print(
                 "loaded learning rate from checkpoint:",
-                self.opt.param_groups[0]["lr"]
+                self.opt.param_groups[
+                    0
+                ][
+                    "lr"
+                ]
             )
 
-            # ------------------------------------------------------------
-            # 重要：
-            # optimizer checkpoint 会把旧 lr 一起恢复。
-            # 这里重新使用本次 fine-tuning 指定的新 lr。
-            # ------------------------------------------------------------
             for group in self.opt.param_groups:
-                group["weight_decay"] = tgt_wd
-                group["lr"] = tgt_lr
+                group[
+                    "weight_decay"
+                ] = tgt_wd
+
+                group[
+                    "lr"
+                ] = tgt_lr
 
             print(
                 "fine-tuning learning rate:",
-                self.opt.param_groups[0]["lr"]
+                self.opt.param_groups[
+                    0
+                ][
+                    "lr"
+                ]
             )
-            self.opt.param_groups[0]['capturable'] = True
 
+            self.opt.param_groups[
+                0
+            ][
+                "capturable"
+            ] = True
     def cond_modifiers(self, cond, motion):
         # All modifiers must be in-place
         self.target_cond_modifier(cond, motion)
