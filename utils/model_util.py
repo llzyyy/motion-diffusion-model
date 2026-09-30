@@ -83,14 +83,14 @@ def get_model_args(args, data):
             'all_goal_joint_names': all_goal_joint_names, 'multi_target_cond': multi_target_cond, 'multi_encoder_type': multi_encoder_type, 'target_enc_layers': target_enc_layers,'amp_cond': amp_cond,
             }
 
-
-
-def create_gaussian_diffusion(args):
+def create_gaussian_diffusion(args,timestep_respacing=None,):
     # default params
     predict_xstart = True  # we always predict x_start (a.k.a. x0), that's our deal!
     steps = args.diffusion_steps
     scale_beta = 1.  # no scaling
-    timestep_respacing = ''  # can be used for ddim sampling, we don't use it.
+    if timestep_respacing is None or timestep_respacing == '':
+        timestep_respacing = [steps]
+    # can be used for ddim sampling, we don't use it.
     learn_sigma = False
     rescale_timesteps = False
 
