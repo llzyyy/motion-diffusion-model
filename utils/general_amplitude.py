@@ -127,7 +127,231 @@ def _safe_cont6d_to_matrix(
         dim=-1,
     )
 
+def general_motion_local_trajectory_shape_humanml(
+    motion,
+    valid_mask,
+    dataset,
+    local_offsets,
+):
+    """
+    Extract amplitude-normalized temporal trajectory shape
+    from the 21 local joint endpoint trajectories.
 
+    Returns
+    -------
+    shape:
+        [B,T,21,3]
+
+    trajectory_rms:
+        [B,21]
+
+    local_endpoints:
+        [B,T,21,3]
+
+    Definition
+    ----------
+        u(t,j) = R_local(t,j) @ offset_j
+
+        v(t,j) = u(t,j) - mean_t(u(t,j))
+
+        sigma_j =
+            sqrt(mean_t(||v(t,j)||^2))
+
+        q(t,j) =
+            v(t,j) / sigma_j
+
+    If motion amplitude is simply scaled:
+
+        v_new = s * v_old
+
+    then:
+
+        q_new = q_old
+
+    Therefore this preserves trajectory shape without
+    preventing amplitude scaling.
+    """
+
+    raw = _inverse_normalize_humanml(
+        motion,
+        dataset,
+    )
+
+    B, T, _ = raw.shape
+
+    valid = (
+        valid_mask[
+            ...,
+            :T
+        ]
+        .squeeze(1)
+        .squeeze(1)
+        .to(
+            device=motion.device,
+            dtype=motion.dtype,
+        )
+    )
+
+    local_offsets = (
+        local_offsets
+        .to(
+            device=motion.device,
+            dtype=motion.dtype,
+        )
+    )
+
+    # --------------------------------------------------------
+    # HumanML3D local Rot6D
+    # [B,T,126] -> [B,T,21,6]
+    # --------------------------------------------------------
+
+    rot6d = (
+        raw[
+            :,
+            :,
+            ROT6D_START:
+            ROT6D_END
+        ]
+        .reshape(
+            B,
+            T,
+            N_JOINT_CHANNELS,
+            6,
+        )
+    )
+
+    rotation_matrices = (
+        _safe_cont6d_to_matrix(
+            rot6d
+        )
+    )
+
+    # --------------------------------------------------------
+    # Local spatial endpoint
+    #
+    # u(t,j) = R_local(t,j) @ offset_j
+    #
+    # [B,T,21,3]
+    # --------------------------------------------------------
+
+    local_endpoints = torch.matmul(
+        rotation_matrices,
+        local_offsets[
+            :,
+            None,
+            :,
+            :,
+            None,
+        ],
+    ).squeeze(-1)
+
+    # --------------------------------------------------------
+    # Temporal mean
+    # --------------------------------------------------------
+
+    frame_count = (
+        valid
+        .sum(
+            dim=1
+        )
+        .clamp_min(
+            1.0
+        )
+    )
+
+    local_center = (
+        local_endpoints
+        *
+        valid[
+            :,
+            :,
+            None,
+            None
+        ]
+    ).sum(
+        dim=1
+    ) / frame_count[
+        :,
+        None,
+        None
+    ]
+
+    centered = (
+        local_endpoints
+        -
+        local_center[
+            :,
+            None,
+            :,
+            :
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Per-joint temporal RMS
+    #
+    # [B,21]
+    # --------------------------------------------------------
+
+    trajectory_rms = torch.sqrt(
+        (
+            centered
+            .pow(2)
+            .sum(dim=-1)
+            *
+            valid[
+                :,
+                :,
+                None
+            ]
+        ).sum(
+            dim=1
+        )
+        /
+        frame_count[
+            :,
+            None
+        ]
+        +
+        EPS
+    )
+
+    # --------------------------------------------------------
+    # Remove amplitude magnitude.
+    #
+    # q(t,j) = centered trajectory / RMS_j
+    # --------------------------------------------------------
+
+    shape = (
+        centered
+        /
+        trajectory_rms[
+            :,
+            None,
+            :,
+            None
+        ].clamp_min(
+            1e-6
+        )
+    )
+
+    # Invalid frames do not participate.
+    shape = (
+        shape
+        *
+        valid[
+            :,
+            :,
+            None,
+            None
+        ]
+    )
+
+    return (
+        shape,
+        trajectory_rms,
+        local_endpoints,
+    )
 def _recover_root_yaw(
     raw,
 ):
@@ -167,7 +391,148 @@ def _recover_root_yaw(
         *
         root_rot_ang
     )
+def general_motion_mean_local_endpoints_humanml(
+    motion,
+    valid_mask,
+    dataset,
+    local_offsets,
+):
+    """
+    Compute the mean parent-local spatial endpoint for each
+    non-root joint.
 
+    Parameters
+    ----------
+    motion:
+        [B,263,1,T]
+
+    valid_mask:
+        [B,1,1,T]
+
+    local_offsets:
+        [B,21,3]
+
+    Returns
+    -------
+    mean_local_endpoints:
+        [B,21,3]
+
+    Physical meaning
+    ----------------
+    u_{t,j} = R_local(t,j) @ o_j
+
+    mean_u_j = mean_t(u_{t,j})
+
+    This represents the average local bone pose of joint j
+    over the whole motion.
+    """
+
+    raw = _inverse_normalize_humanml(
+        motion,
+        dataset,
+    )
+
+    B, T, _ = raw.shape
+
+    valid = (
+        valid_mask[
+            ...,
+            :T
+        ]
+        .squeeze(1)
+        .squeeze(1)
+        .to(
+            device=motion.device,
+            dtype=motion.dtype,
+        )
+    )
+
+    local_offsets = (
+        local_offsets
+        .to(
+            device=motion.device,
+            dtype=motion.dtype,
+        )
+    )
+
+    # --------------------------------------------------------
+    # HumanML3D Rot6D:
+    #
+    # [B,T,126]
+    # ->
+    # [B,T,21,6]
+    # --------------------------------------------------------
+
+    rot6d = (
+        raw[
+            :,
+            :,
+            ROT6D_START:
+            ROT6D_END
+        ]
+        .reshape(
+            B,
+            T,
+            N_JOINT_CHANNELS,
+            6,
+        )
+    )
+
+    rotation_matrices = (
+        _safe_cont6d_to_matrix(
+            rot6d
+        )
+    )
+
+    # --------------------------------------------------------
+    # u_{t,j} = R_local(t,j) @ o_j
+    #
+    # [B,T,21,3]
+    # --------------------------------------------------------
+
+    local_endpoints = torch.matmul(
+        rotation_matrices,
+        local_offsets[
+            :,
+            None,
+            :,
+            :,
+            None,
+        ],
+    ).squeeze(-1)
+
+    # --------------------------------------------------------
+    # Valid-frame average.
+    # --------------------------------------------------------
+
+    frame_count = (
+        valid
+        .sum(
+            dim=1
+        )
+        .clamp_min(
+            1.0
+        )
+    )
+
+    mean_local_endpoints = (
+        local_endpoints
+        *
+        valid[
+            :,
+            :,
+            None,
+            None
+        ]
+    ).sum(
+        dim=1
+    ) / frame_count[
+        :,
+        None,
+        None
+    ]
+
+    return mean_local_endpoints
 
 def general_motion_amplitude_humanml(
     motion,
@@ -176,6 +541,7 @@ def general_motion_amplitude_humanml(
     amp_mask,
     local_offsets,
     body_height,
+    return_details=False,
 ):
     """
     Differentiable training-time General Amplitude Evaluator V2.
@@ -422,36 +788,144 @@ def general_motion_amplitude_humanml(
         ]
     )
 
-    denominator = (
+    # ========================================================
+    # Actual weighted amplitude contribution
+    #
+    # frame_contribution:
+    #     [B,T,25]
+    #
+    # C_c =
+    #     sum_t W0(t,c) * d(t,c)^2
+    # ========================================================
+
+    frame_contribution = (
+        effective_weight
+        *
+        squared_amplitude
+    )
+
+    # [B,25]
+    channel_contribution = (
+        frame_contribution
+        .sum(
+            dim=1
+        )
+    )
+
+    # [B,25]
+    channel_weight = (
         effective_weight
         .sum(
-            dim=(
-                1,
-                2
-            )
+            dim=1
+        )
+    )
+
+    # --------------------------------------------------------
+    # Original global numerator / denominator.
+    # These are mathematically identical to the old code.
+    # --------------------------------------------------------
+
+    numerator = (
+        channel_contribution
+        .sum(
+            dim=1
+        )
+    )
+
+    denominator = (
+        channel_weight
+        .sum(
+            dim=1
         )
         .clamp_min(
             EPS
         )
     )
 
-    numerator = (
-        effective_weight
-        *
-        squared_amplitude
-    ).sum(
-        dim=(
-            1,
-            2
-        )
-    )
-
-    return torch.sqrt(
+    amplitude = torch.sqrt(
         numerator
         /
         denominator
         +
         EPS
+    )
+
+    # Keep all existing callers unchanged.
+    if not return_details:
+
+        return amplitude
+
+    # ========================================================
+    # Contribution profile
+    #
+    # profile[b,c] tells us what fraction of the total weighted
+    # squared amplitude is contributed by channel c.
+    #
+    # sum_c profile[b,c] ~= 1
+    # ========================================================
+
+    channel_profile = (
+        channel_contribution
+        /
+        numerator[
+            :,
+            None
+        ].clamp_min(
+            EPS
+        )
+    )
+
+    # --------------------------------------------------------
+    # Weighted RMS inside each individual channel.
+    # Useful for distinguishing:
+    #
+    #   "its weight is high"
+    #
+    # from
+    #
+    #   "its actual spatial excursion became large".
+    # --------------------------------------------------------
+
+    channel_rms = torch.sqrt(
+        channel_contribution
+        /
+        channel_weight.clamp_min(
+            EPS
+        )
+        +
+        EPS
+    )
+
+    details = {
+
+        # [B,T,25]
+        "frame_contribution":
+            frame_contribution,
+
+        # [B,25]
+        "channel_contribution":
+            channel_contribution,
+
+        # [B,25]
+        "channel_weight":
+            channel_weight,
+
+        # [B,25]
+        "channel_profile":
+            channel_profile,
+
+        # [B,25]
+        "channel_rms":
+            channel_rms,
+
+        # [B,T,25]
+        "squared_amplitude":
+            squared_amplitude,
+    }
+
+    return (
+        amplitude,
+        details,
     )
 
 

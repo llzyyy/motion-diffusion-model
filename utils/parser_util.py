@@ -291,6 +291,163 @@ def add_generate_options(parser):
             "1.0 keeps the original amplitude embedding strength."
         )
     )
+    # ============================================================
+    # Zero-shot amplitude DNO
+    # ============================================================
+
+    group.add_argument(
+        "--target_t",
+        default=0.0,
+        type=float,
+        help=(
+            "Target relative motion amplitude for zero-shot DNO. "
+            "For example: -0.2, 0.0, +0.2."
+        )
+    )
+
+    group.add_argument(
+        "--dno_opt_steps",
+        default=100,
+        type=int,
+        help="Number of diffusion-noise optimization steps."
+    )
+
+    group.add_argument(
+        "--dno_lr",
+        default=0.05,
+        type=float,
+        help="Learning rate for diffusion-noise optimization."
+    )
+
+    group.add_argument(
+        "--dno_ddim_steps",
+        default=10,
+        type=int,
+        help="Number of differentiable DDIM denoising steps."
+    )
+
+    group.add_argument(
+        "--dno_warmup_steps",
+        default=10,
+        type=int,
+        help="DNO learning-rate warmup steps."
+    )
+
+    group.add_argument(
+        "--dno_noise_reg",
+        default=0.0,
+        type=float,
+        help="Regularization weight for ||z-z0||^2."
+    )
+
+    group.add_argument(
+        "--amp_window_frames",
+        default=41,
+        type=int,
+        help="Allocator V3 temporal window."
+    )
+    group.add_argument(
+        "--dno_mean_pose_weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight of baseline mean-pose preservation "
+            "loss during DNO."
+        ),
+    )
+    group.add_argument(
+        "--dno_contact_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of baseline foot-contact geometry "
+            "preservation during DNO."
+        ),
+    )
+
+    group.add_argument(
+        "--dno_contact_height_weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Relative weight of foot-height term inside "
+            "the contact loss."
+        ),
+    )
+    group.add_argument(
+        "--dno_inactive_preserve_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of action-adaptive inactive-region "
+            "bone-direction preservation."
+        ),
+    )
+
+    group.add_argument(
+        "--dno_inactive_preserve_gamma",
+        type=float,
+        default=2.0,
+        help=(
+            "Exponent applied to (1 - allocator activity). "
+            "Larger values concentrate preservation on "
+            "more inactive joints."
+        ),
+    )
+    group.add_argument(
+        "--dno_profile_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of frozen baseline amplitude-contribution "
+            "profile preservation during DNO."
+        ),
+    )
+    group.add_argument(
+        "--dno_shape_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of amplitude-normalized temporal "
+            "trajectory-shape preservation during DNO."
+        ),
+    )
+    group.add_argument(
+        "--dno_shape_weight_min",
+        type=float,
+        default=0.03,
+    )
+
+    group.add_argument(
+        "--dno_shape_weight_max",
+        type=float,
+        default=0.25,
+    )
+
+    group.add_argument(
+        "--dno_shape_weight_tau",
+        type=float,
+        default=0.05,
+    )
+    group.add_argument(
+        "--dno_shape_budget_ratio",
+        type=float,
+        default=0.10,
+        help=(
+            "Maximum allowed relative trajectory-shape "
+            "distortion L_shape / C0."
+        ),
+    )
+
+    group.add_argument(
+        "--dno_shape_penalty_weight",
+        type=float,
+        default=100.0,
+        help=(
+            "Quadratic penalty weight applied only when "
+            "the relative shape budget is violated."
+        ),
+    )
 
 def add_edit_options(parser):
     group = parser.add_argument_group('edit')

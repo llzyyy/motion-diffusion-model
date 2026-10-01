@@ -295,6 +295,69 @@ def optimize_diffusion_noise(
             ] = (
                 f"{record['t_hat']:+.4f}"
             )
+        if "profile_l1" in record:
+            postfix[
+                "P_L1"
+            ] = (
+                f"{record['profile_l1']:.4f}"
+            )
+        if "mean_pose_loss" in record:
+            postfix[
+                "L_mean"
+            ] = (
+                f"{record['mean_pose_loss']:.5f}"
+            )
+        if "contact_loss" in record:
+            postfix[
+                "L_contact"
+            ] = (
+                f"{record['contact_loss']:.5f}"
+            )
+        if "contact_skate_loss" in record:
+            postfix[
+                "L_skate"
+            ] = (
+                f"{record['contact_skate_loss']:.5f}"
+            )
+
+        if "contact_height_loss" in record:
+            postfix[
+                "L_height"
+            ] = (
+                f"{record['contact_height_loss']:.5f}"
+            )
+        if "inactive_preserve_loss" in record:
+            postfix[
+                "L_pres"
+            ] = (
+                f"{record['inactive_preserve_loss']:.5f}"
+            )
+        if "shape_loss" in record:
+            postfix[
+                "L_shape"
+            ] = (
+                f"{record['shape_loss']:.5f}"
+            )
+        if "shape_weight_eff" in record:
+            postfix[
+                "lambda_s"
+            ] = (
+                f"{record['shape_weight_eff']:.3f}"
+            )
+        if "shape_loss" in record:
+            postfix["L_shape"] = (
+                f"{record['shape_loss']:.5f}"
+            )
+
+        if "relative_shape" in record:
+            postfix["D_shape"] = (
+                f"{record['relative_shape']:.4f}"
+            )
+
+        if "shape_violation" in record:
+            postfix["viol"] = (
+                f"{record['shape_violation']:.4f}"
+            )
 
         progress_bar.set_postfix(
             postfix
